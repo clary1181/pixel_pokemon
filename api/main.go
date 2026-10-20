@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -132,7 +133,16 @@ var (
 	}
 	
 	// Map to store saved games - in a real app, this would be a database
-	savedGames = make(map[string]SaveRequest)
+	savedGames   = make(map[string]SaveRequest)
+	savedGamesMu sync.RWMutex // protege savedGames
+)
+
+// Limites para evitar agotamiento de recursos
+const (
+	maxBodyBytes = 1 << 20 // 1 MB por peticion
+	maxSaves     = 10000   // partidas guardadas en memoria
+	maxPokemons  = 100     // pokemon por partida
+	maxRounds    = 50      // rondas por simulacion
 )
 
 func main() {
@@ -162,7 +172,15 @@ func main() {
 	// Start the server
 	serverAddr := fmt.Sprintf(":%s", port)
 	log.Printf("Starting Pokemon game API server on %s", serverAddr)
-	log.Fatal(http.ListenAndServe(serverAddr, handler))
+	srv := &http.Server{
+		Addr:              serverAddr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	log.Fatal(srv.ListenAndServe())
 }
 
 // Middleware for CORS
@@ -246,10 +264,18 @@ func simulateBattleHandler(w http.ResponseWriter, r *http.Request) {
 		Rounds          int     `json:"rounds"`
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	err := json.NewDecoder(r.Body).Decode(&requestData)
 	if err != nil {
 		sendErrorResponse(w, "Invalid request body", http.StatusBadRequest)
 		return
+	}
+
+	for _, p := range []Pokemon{requestData.PlayerPokemon, requestData.OpponentPokemon} {
+		if err := validatePokemon(p); err != nil {
+			sendErrorResponse(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 
 	// Validate request data
@@ -262,6 +288,9 @@ func simulateBattleHandler(w http.ResponseWriter, r *http.Request) {
 	rounds := requestData.Rounds
 	if rounds <= 0 {
 		rounds = 5
+	}
+	if rounds > maxRounds {
+		rounds = maxRounds
 	}
 
 	// Simulate the battle
@@ -281,7 +310,8 @@ func saveGameHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 
-	// Parse the request body
+	// Parse the request body (con limite de tamano)
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	var saveRequest SaveRequest
 	err := json.NewDecoder(r.Body).Decode(&saveRequest)
 	if err != nil {
@@ -290,7 +320,7 @@ func saveGameHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate request data
-	if saveRequest.PlayerID == "" {
+	if saveRequest.PlayerID == "" || len(saveRequest.PlayerID) > 64 || len(saveRequest.Pokemons) > maxPokemons {
 		sendErrorResponse(w, "Player ID is required", http.StatusBadRequest)
 		return
 	}
@@ -301,7 +331,14 @@ func saveGameHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Save the game state
+	savedGamesMu.Lock()
+	if _, exists := savedGames[saveRequest.PlayerID]; !exists && len(savedGames) >= maxSaves {
+		savedGamesMu.Unlock()
+		sendErrorResponse(w, "Save storage is full", http.StatusServiceUnavailable)
+		return
+	}
 	savedGames[saveRequest.PlayerID] = saveRequest
+	savedGamesMu.Unlock()
 
 	// Return success response
 	response := SaveResponse{
@@ -329,7 +366,9 @@ func loadGameHandler(w http.ResponseWriter, r *http.Request) {
 	playerID := parts[len(parts)-1]
 
 	// Retrieve the saved game
+	savedGamesMu.RLock()
 	savedGame, exists := savedGames[playerID]
+	savedGamesMu.RUnlock()
 	if !exists {
 		sendErrorResponse(w, "No saved game found for this player", http.StatusNotFound)
 		return
@@ -535,3 +574,23 @@ func executeAttack(attacker, defender *Pokemon) string {
 	// Handle non-damaging moves (not implemented in detail)
 	return fmt.Sprintf("%s used %s!", attacker.Name, move.Name)
 } 
+
+// validatePokemon rechaza datos que causarian panics o abuso de recursos
+func validatePokemon(p Pokemon) error {
+	switch {
+	case p.Level < 1 || p.Level > 100:
+		return fmt.Errorf("level must be between 1 and 100")
+	case p.HP < 1 || p.HP > 999 || p.MaxHP < 1 || p.MaxHP > 999:
+		return fmt.Errorf("hp and maxHp must be between 1 and 999")
+	case p.Attack < 0 || p.Attack > 999 || p.Defense < 1 || p.Defense > 999 || p.Speed < 0 || p.Speed > 999:
+		return fmt.Errorf("invalid stats")
+	case len(p.Moves) == 0 || len(p.Moves) > 4:
+		return fmt.Errorf("a pokemon needs between 1 and 4 moves")
+	}
+	for _, m := range p.Moves {
+		if m.Power < 0 || m.Power > 250 || m.Accuracy < 0 || m.Accuracy > 100 {
+			return fmt.Errorf("invalid move values")
+		}
+	}
+	return nil
+}

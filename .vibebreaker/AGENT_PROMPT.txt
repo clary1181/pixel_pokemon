@@ -1,0 +1,5 @@
+Run the full VibeBreaker 20-Pass Protocol defined in .vibebreaker/AUDIT_PROTOCOL.md.
+Stay read-only. Execute passes 01 through 20 in order.
+Write raw pass results under .vibebreaker/raw/ and the final report to .vibebreaker/FINAL_REPORT.md.
+Do not fix anything until the final report is complete.
+Pass 20 is the adversarial verifier and is the only pass allowed to finalize finding status.

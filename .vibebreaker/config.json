@@ -1,0 +1,7 @@
+{
+  "protocol": "VibeBreaker 20-Pass Protocol",
+  "version": "0.2.1",
+  "mode": "FULL",
+  "output": ".vibebreaker/FINAL_REPORT.md",
+  "readOnlyAudit": true
+}
